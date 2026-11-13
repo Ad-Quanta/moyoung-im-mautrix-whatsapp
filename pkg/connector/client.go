@@ -104,6 +104,11 @@ type resyncQueueItem struct {
 	ghost  *bridgev2.Ghost
 }
 
+// contactResyncSession 标记一次进行中的联系人全量同步，便于单飞与按会话取消。
+type contactResyncSession struct {
+	cancel context.CancelFunc
+}
+
 type WhatsAppClient struct {
 	Main      *WhatsAppConnector
 	UserLogin *bridgev2.UserLogin
@@ -113,20 +118,26 @@ type WhatsAppClient struct {
 	LID       types.JID
 	MC        mClient
 
-	historySyncWakeup  chan struct{}
-	stopLoops          atomic.Pointer[context.CancelFunc]
-	resyncQueue        map[types.JID]resyncQueueItem
-	resyncQueueLock    sync.Mutex
-	nextResync         time.Time
-	directMediaRetries map[networkid.MessageID]*directMediaRetry
-	directMediaLock    sync.Mutex
-	avatarLock         exsync.KeyedMutex[types.JID]
-	mediaRetryLock     *semaphore.Weighted
-	offlineSyncWaiter  atomic.Pointer[chan error]
-	isNewLogin         bool
-	pushNamesSynced    *exsync.Event
-	lastPresence       types.Presence
-	blocklistLock      sync.Mutex
+	historySyncWakeup chan struct{}
+	stopLoops         atomic.Pointer[context.CancelFunc]
+	// loopCtx 跟随 startLoops/callStopLoops 生命周期，供联系人全量同步等后台任务取消。
+	loopCtxMu sync.Mutex
+	loopCtx   context.Context
+	// contactResyncSession 用于同登录单飞：自动触发跳过进行中任务，手动触发取消旧任务。
+	contactResyncMu      sync.Mutex
+	contactResyncSession *contactResyncSession
+	resyncQueue          map[types.JID]resyncQueueItem
+	resyncQueueLock      sync.Mutex
+	nextResync           time.Time
+	directMediaRetries   map[networkid.MessageID]*directMediaRetry
+	directMediaLock      sync.Mutex
+	avatarLock           exsync.KeyedMutex[types.JID]
+	mediaRetryLock       *semaphore.Weighted
+	offlineSyncWaiter    atomic.Pointer[chan error]
+	isNewLogin           bool
+	pushNamesSynced      *exsync.Event
+	lastPresence         types.Presence
+	blocklistLock        sync.Mutex
 
 	disableNewsletter bool
 
@@ -394,11 +405,73 @@ func (wa *WhatsAppClient) startLoops() {
 	if oldStop != nil {
 		(*oldStop)()
 	}
+	// 重连时清理旧联系人同步会话，避免 automatic 单飞状态残留导致新任务被跳过。
+	wa.cancelContactResync()
+	// 先取消旧 loop，再发布新的 loopCtx，避免后台任务继续使用已失效上下文。
+	wa.setLoopCtx(ctx)
 	ctx = wa.UserLogin.Log.WithContext(ctx)
 	go wa.historySyncLoop(ctx)
 	go wa.ghostResyncLoop(ctx)
 	if mrc := wa.Main.Config.HistorySync.MediaRequests; mrc.AutoRequestMedia && mrc.RequestMethod == MediaRequestMethodLocalTime {
 		go wa.mediaRequestLoop(ctx)
+	}
+}
+
+func (wa *WhatsAppClient) setLoopCtx(ctx context.Context) {
+	wa.loopCtxMu.Lock()
+	wa.loopCtx = ctx
+	wa.loopCtxMu.Unlock()
+}
+
+// getLoopCtx 返回当前登录 loop 上下文；尚未 startLoops 时回退到 Bridge.BackgroundCtx。
+func (wa *WhatsAppClient) getLoopCtx() context.Context {
+	wa.loopCtxMu.Lock()
+	defer wa.loopCtxMu.Unlock()
+	if wa.loopCtx != nil {
+		return wa.loopCtx
+	}
+	return wa.Main.Bridge.BackgroundCtx
+}
+
+// beginContactResync 建立可取消的联系人同步会话。
+// automatic=true 且已有任务时直接跳过；手动触发会取消旧任务后重建。
+func (wa *WhatsAppClient) beginContactResync(automatic bool) (context.Context, *contactResyncSession, bool) {
+	// 先取父上下文，避免持有 contactResyncMu 时再抢 loopCtxMu。
+	parent := wa.getLoopCtx()
+	wa.contactResyncMu.Lock()
+	defer wa.contactResyncMu.Unlock()
+	if automatic && wa.contactResyncSession != nil {
+		return nil, nil, false
+	}
+	if wa.contactResyncSession != nil {
+		wa.contactResyncSession.cancel()
+		wa.contactResyncSession = nil
+	}
+	ctx, cancel := context.WithCancel(parent)
+	session := &contactResyncSession{cancel: cancel}
+	wa.contactResyncSession = session
+	return ctx, session, true
+}
+
+// endContactResync 结束指定会话；若已被更新的会话替换则只取消自身，不清掉新会话。
+func (wa *WhatsAppClient) endContactResync(session *contactResyncSession) {
+	if session == nil {
+		return
+	}
+	session.cancel()
+	wa.contactResyncMu.Lock()
+	defer wa.contactResyncMu.Unlock()
+	if wa.contactResyncSession == session {
+		wa.contactResyncSession = nil
+	}
+}
+
+func (wa *WhatsAppClient) cancelContactResync() {
+	wa.contactResyncMu.Lock()
+	defer wa.contactResyncMu.Unlock()
+	if wa.contactResyncSession != nil {
+		wa.contactResyncSession.cancel()
+		wa.contactResyncSession = nil
 	}
 }
 
@@ -416,6 +489,8 @@ func (wa *WhatsAppClient) callStopLoops() {
 	if stopHistorySyncLoop := wa.stopLoops.Swap(nil); stopHistorySyncLoop != nil {
 		(*stopHistorySyncLoop)()
 	}
+	// 同步取消联系人全量同步，避免 logout/disconnect 后继续空转。
+	wa.cancelContactResync()
 }
 
 func (wa *WhatsAppClient) Disconnect() {

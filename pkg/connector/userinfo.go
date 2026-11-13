@@ -363,6 +363,10 @@ func (wa *WhatsAppClient) makeLazyGhostAvatarUpdater(avatarID string, forceUpdat
 }
 
 func (wa *WhatsAppClient) fetchGhostAvatar(ctx context.Context, ghost *bridgev2.Ghost) bool {
+	// 防御：上层应已保证登录态；Client 为空时直接返回，避免刷 client is nil 错误日志。
+	if wa.Client == nil {
+		return false
+	}
 	jid := waid.ParseUserID(ghost.ID)
 	existingID := string(ghost.AvatarID)
 	if existingID == "remove" || existingID == "unauthorized" {
@@ -404,13 +408,29 @@ func (wa *WhatsAppClient) fetchGhostAvatar(ctx context.Context, ghost *bridgev2.
 
 func (wa *WhatsAppClient) resyncContacts(forceAvatarSync, automatic bool) {
 	log := wa.UserLogin.Log.With().Str("action", "resync contacts").Logger()
-	ctx := log.WithContext(wa.Main.Bridge.BackgroundCtx)
+	baseCtx, session, ok := wa.beginContactResync(automatic)
+	if !ok {
+		log.Debug().Msg("Contact resync already in progress, skipping automatic resync")
+		return
+	}
+	defer wa.endContactResync(session)
+
+	ctx := log.WithContext(baseCtx)
+	// 与 doGhostResync 对齐：未登录时不启动全量联系人同步。
+	if !wa.IsLoggedIn() {
+		log.Warn().Msg("Not logged in, skipping contact resync")
+		return
+	}
 	if automatic && wa.isNewLogin {
 		log.Debug().Msg("Waiting for push name history sync before resyncing contacts")
 		timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		_ = wa.pushNamesSynced.Wait(timeoutCtx)
 		cancel()
 		if ctx.Err() != nil {
+			return
+		}
+		if !wa.IsLoggedIn() {
+			log.Warn().Msg("Logged out while waiting for push name sync, skipping contact resync")
 			return
 		}
 	}
@@ -420,9 +440,11 @@ func (wa *WhatsAppClient) resyncContacts(forceAvatarSync, automatic bool) {
 		log.Err(err).Msg("Failed to get cached contacts")
 		return
 	}
-	log.Info().Int("contact_count", len(contacts)).Msg("Resyncing displaynames with contact info")
+	log.Info().Int("contact_count", len(contacts)).Bool("automatic", automatic).Msg("Resyncing displaynames with contact info")
 	for jid := range contacts {
-		if ctx.Err() != nil {
+		// 登录失效或 loop/会话取消后立即退出，避免 store/client 为空时继续空转打错误日志。
+		if ctx.Err() != nil || !wa.IsLoggedIn() {
+			log.Warn().Err(ctx.Err()).Msg("Stopping contact resync due to cancellation or logout")
 			return
 		}
 		ghost, err := wa.Main.Bridge.GetGhostByID(ctx, waid.MakeUserID(jid))
@@ -433,7 +455,16 @@ func (wa *WhatsAppClient) resyncContacts(forceAvatarSync, automatic bool) {
 		} else if contact, err := contactStore.GetContact(ctx, jid); err != nil {
 			log.Err(err).Stringer("jid", jid).Msg("Failed to get contact info")
 		} else {
-			userInfo := wa.contactToUserInfo(ctx, jid, contact, "", forceAvatarSync || ghost.AvatarID == "")
+			needAvatar := forceAvatarSync || ghost.AvatarID == ""
+			fetchAvatarNow := needAvatar
+			if automatic {
+				// P1：自动全量同步不在此处同步拉头像，改为入队给可取消的 ghostResyncLoop 限速处理。
+				fetchAvatarNow = false
+				if needAvatar {
+					wa.EnqueueGhostResync(ghost)
+				}
+			}
+			userInfo := wa.contactToUserInfo(ctx, jid, contact, "", fetchAvatarNow)
 			ghost.UpdateInfo(ctx, userInfo)
 			wa.syncAltGhostWithInfo(ctx, jid, ghost)
 		}
@@ -470,7 +501,8 @@ func (wa *WhatsAppClient) syncAltGhostWithInfo(ctx context.Context, jid types.JI
 		Stringer("jid", jid).
 		Stringer("alternate_jid", altJID).
 		Msg("Synced alternate ghost with info")
-	go wa.syncRemoteProfile(ctx, ghost)
+	// 不再对 alt ghost 无条件 go syncRemoteProfile：其对非本人 ID 会立即返回，
+	// 全量联系人同步时会造成 O(N) 无效 goroutine 放大。本人资料改由连接成功/CriticalBlock 路径同步。
 }
 
 func makeInfoFromGhost(ghost *bridgev2.Ghost) *bridgev2.UserInfo {
