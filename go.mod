@@ -23,6 +23,9 @@ require (
 	maunium.net/go/mautrix v0.32.1-0.20261031224934-b69deb427bd7
 )
 
+// 账号注销需要在 bridgev2 包内清理未导出缓存，使用锁定提交的本地副本。
+replace maunium.net/go/mautrix => ./third_party/mautrix
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/beeper/argo-go v1.1.2 // indirect

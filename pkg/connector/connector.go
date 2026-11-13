@@ -63,6 +63,11 @@ type WhatsAppConnector struct {
 	stopMediaEditCacheLoop atomic.Pointer[context.CancelFunc]
 
 	unmigratedDMs *exsync.Set[networkid.PortalKey]
+
+	// 注销清理端点只能注册一次，避免连接器重复启动时触发路由冲突。
+	accountCleanupRouteOnce sync.Once
+	// 同一登录的远端解绑和本地清理必须串行，避免并发请求重复删除。
+	accountCleanupLocks sync.Map
 }
 
 func init() {
@@ -158,6 +163,10 @@ func (wa *WhatsAppConnector) Start(ctx context.Context) error {
 	err = wa.DB.Upgrade(ctx)
 	if err != nil {
 		return bridgev2.DBUpgradeError{Err: err, Section: "whatsapp"}
+	}
+	// 在业务迁移前初始化账号注销清理，构建时不再依赖外部补丁。
+	if err = wa.initAccountCleanup(ctx); err != nil {
+		return fmt.Errorf("failed to initialize account cleanup: %w", err)
 	}
 
 	err = wa.migrateToLIDDMs(ctx)
