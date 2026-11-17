@@ -303,6 +303,8 @@ type directMediaRetry struct {
 	requested   bool
 	resultType  waMmsRetry.MediaRetryNotification_ResultType
 	decryptFail bool
+	// mediaKey 收件箱下载重试时用于解密 MediaRetry，不依赖 Matrix 消息元数据。
+	mediaKey []byte
 }
 
 func (wa *WhatsAppClient) getDirectMediaRetryState(msgID networkid.MessageID, create bool) *directMediaRetry {
@@ -353,6 +355,9 @@ func (wa *WhatsAppClient) requestDirectMedia(ctx context.Context, rawMsgID netwo
 	state := wa.getDirectMediaRetryState(rawMsgID, true)
 	state.Lock()
 	defer state.Unlock()
+	if len(key) > 0 {
+		state.mediaKey = append([]byte(nil), key...)
+	}
 	if !state.requested {
 		zerolog.Ctx(ctx).Debug().Msg("Sending request for missing media in direct download")
 		err := wa.sendMediaRequestDirect(ctx, rawMsgID, key)
@@ -412,4 +417,44 @@ func (wa *WhatsAppClient) receiveDirectMediaRetry(ctx context.Context, msg *data
 	if state != nil {
 		state.resultURL = retryData.GetDirectPath()
 	}
+}
+
+// handleWAMediaRetryInbox 收件箱模式处理手机补发的媒体：只唤醒内存等待者，不写 Matrix。
+func (wa *WhatsAppClient) handleWAMediaRetryInbox(ctx context.Context, evt *events.MediaRetry) bool {
+	msgID := waid.MakeMessageID(evt.ChatID, evt.SenderID, evt.MessageID)
+	if !evt.ChatID.IsEmpty() && evt.ChatID.Server == types.DefaultUserServer {
+		if chatLID, err := wa.GetStore().LIDs.GetLIDForPN(ctx, evt.ChatID); err == nil && !chatLID.IsEmpty() {
+			msgID = waid.MakeMessageID(chatLID, evt.SenderID, evt.MessageID)
+		}
+	}
+	state := wa.getDirectMediaRetryState(msgID, false)
+	if state == nil {
+		// 兼容原始 chat JID 作为键的等待者。
+		altID := waid.MakeMessageID(evt.ChatID, evt.SenderID, evt.MessageID)
+		state = wa.getDirectMediaRetryState(altID, false)
+	}
+	if state == nil {
+		return true
+	}
+	state.Lock()
+	defer func() {
+		state.wait.Set()
+		state.Unlock()
+	}()
+	if len(state.mediaKey) == 0 {
+		wa.UserLogin.Log.Warn().Str("message_id", string(msgID)).Msg("inbox media retry missing stored media key")
+		state.decryptFail = true
+		return true
+	}
+	retryData, err := whatsmeow.DecryptMediaRetryNotification(evt, state.mediaKey)
+	if err != nil {
+		wa.UserLogin.Log.Warn().Err(err).Msg("Failed to decrypt inbox media retry notification")
+		state.decryptFail = true
+		return true
+	}
+	state.resultType = retryData.GetResult()
+	if retryData.GetDirectPath() != "" {
+		state.resultURL = retryData.GetDirectPath()
+	}
+	return true
 }

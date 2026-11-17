@@ -87,10 +87,24 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 	case *events.Message:
 		success = wa.handleWAMessage(ctx, evt)
 	case *events.Receipt:
+		// 收件箱模式不做已读/投递回执桥接。
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWAReceipt(ctx, evt)
 	case *events.ChatPresence:
+		// 收件箱模式不做输入状态桥接。
+		if wa.inboxEnabled() {
+			break
+		}
 		wa.handleWAChatPresence(ctx, evt)
 	case *events.UndecryptableMessage:
+		if wa.inboxEnabled() {
+			// 收件箱无法保存未解密内容，直接忽略。
+			success = true
+			break
+		}
 		success = wa.handleWAUndecryptableMessage(ctx, evt)
 
 	case *events.CallOffer:
@@ -100,23 +114,55 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 	case *events.CallTerminate, *events.CallRelayLatency, *events.CallAccept, *events.UnknownCallEvent:
 		// ignore
 	case *events.IdentityChange:
-		wa.handleWAIdentityChange(ctx, evt)
+		if !wa.inboxEnabled() {
+			wa.handleWAIdentityChange(ctx, evt)
+		}
 	case *events.MarkChatAsRead:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWAMarkChatAsRead(ctx, evt)
 	case *events.DeleteForMe:
+		if wa.inboxEnabled() {
+			// 收件箱不做撤回。
+			success = true
+			break
+		}
 		success = wa.handleWADeleteForMe(ctx, evt)
 	case *events.DeleteChat:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWADeleteChat(ctx, evt)
 	case *events.Mute:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWAMute(evt)
 	case *events.Archive:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWAArchive(evt)
 	case *events.Pin:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWAPin(evt)
 
 	case *events.HistorySync:
 		wa.UserLogin.Log.Warn().Msg("Unexpected history sync event received")
 	case *events.MediaRetry:
+		if wa.inboxEnabled() {
+			// 收件箱下载等待手机补发媒体时，直接更新内存重试状态，不进 Matrix。
+			success = wa.handleWAMediaRetryInbox(ctx, evt)
+			break
+		}
 		success = wa.handleWAMediaRetry(ctx, evt)
 
 	case *events.GroupInfo:
@@ -124,10 +170,22 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 	case *events.JoinedGroup:
 		success = wa.handleWAJoinedGroup(ctx, evt)
 	case *events.NewsletterJoin:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWANewsletterJoin(ctx, evt)
 	case *events.NewsletterLeave:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWANewsletterLeave(evt)
 	case *events.Picture:
+		if wa.inboxEnabled() {
+			success = true
+			break
+		}
 		success = wa.handleWAPictureUpdate(ctx, evt)
 	case *events.NotifyAccountReachoutTimelock:
 		wa.UserLogin.TrackAnalytics("WhatsApp Account Reachout Timelock", map[string]any{
@@ -165,13 +223,21 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		if err != nil {
 			log.Err(err).Msg("Failed to update push name in store")
 		}
-		go wa.syncGhost(wa.JID.ToNonAD(), "push name setting", nil)
+		if !wa.inboxEnabled() {
+			go wa.syncGhost(wa.JID.ToNonAD(), "push name setting", nil)
+		}
 	case *events.Contact:
-		go wa.syncGhost(evt.JID, "contact event", nil)
+		if !wa.inboxEnabled() {
+			go wa.syncGhost(evt.JID, "contact event", nil)
+		}
 	case *events.PushName:
-		go wa.syncGhost(evt.JID, "push name event", nil)
+		if !wa.inboxEnabled() {
+			go wa.syncGhost(evt.JID, "push name event", nil)
+		}
 	case *events.BusinessName:
-		go wa.syncGhost(evt.JID, "business name event", nil)
+		if !wa.inboxEnabled() {
+			go wa.syncGhost(evt.JID, "business name event", nil)
+		}
 
 	case *events.Connected:
 		log.Debug().Msg("Connected to WhatsApp socket")
@@ -405,6 +471,11 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		parsedMessageType: parsedMessageType,
 		dontRenderEdited:  dontRenderEdited,
 	}
+	// 收件箱模式：解密与类型解析完成后直接推 im-router，不创建 Matrix portal。
+	if wa.inboxEnabled() {
+		return wa.handleWAMessageInbox(ctx, evt, parsedMessageType)
+	}
+
 	if evt.UnavailableRequestID != "" {
 		wa.UserLogin.Log.Debug().
 			Str("message_id", evt.Info.ID).
@@ -623,9 +694,6 @@ func (wa *WhatsAppClient) handleWALogout(ctx context.Context, reason events.Conn
 const callEventMaxAge = 15 * time.Minute
 
 func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, senderAlt types.JID, id, callType string, ts time.Time) bool {
-	if !wa.Main.Config.CallStartNotices || time.Since(ts) > callEventMaxAge {
-		return true
-	}
 	if sender.Server == types.DefaultUserServer && senderAlt.IsEmpty() {
 		senderAlt, _ = wa.GetStore().LIDs.GetLIDForPN(ctx, sender)
 	}
@@ -636,6 +704,13 @@ func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, 
 			Str("call_id", id).
 			Msg("Forced phone number caller to LID in incoming call")
 		sender, senderAlt = senderAlt, sender
+	}
+	// 收件箱模式始终保存通话事件，不依赖 call_start_notices。
+	if wa.inboxEnabled() {
+		return wa.handleWACallStartInbox(ctx, group, sender, id, callType, ts)
+	}
+	if !wa.Main.Config.CallStartNotices || time.Since(ts) > callEventMaxAge {
+		return true
 	}
 	chat := group
 	if chat.IsEmpty() {
@@ -843,6 +918,13 @@ func (wa *WhatsAppClient) handleWAPictureUpdate(ctx context.Context, evt *events
 }
 
 func (wa *WhatsAppClient) handleWAGroupInfoChange(ctx context.Context, evt *events.GroupInfo) bool {
+	if wa.inboxEnabled() {
+		// 仅推送已知正式群名；其它群元数据变化不建 Matrix 房间。
+		if evt.Name != nil && strings.TrimSpace(evt.Name.Name) != "" {
+			return wa.handleWAGroupNameInbox(ctx, evt.JID, evt.Name.Name)
+		}
+		return true
+	}
 	eventMeta := simplevent.EventMeta{
 		Type:         bridgev2.RemoteEventChatInfoChange,
 		LogContext:   nil,
@@ -865,6 +947,12 @@ func (wa *WhatsAppClient) handleWAGroupInfoChange(ctx context.Context, evt *even
 }
 
 func (wa *WhatsAppClient) handleWAJoinedGroup(ctx context.Context, evt *events.JoinedGroup) bool {
+	if wa.inboxEnabled() {
+		if strings.TrimSpace(evt.Name) != "" {
+			return wa.handleWAGroupNameInbox(ctx, evt.JID, evt.Name)
+		}
+		return true
+	}
 	return wa.UserLogin.QueueRemoteEvent(&simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventChatResync,

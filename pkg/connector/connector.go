@@ -68,6 +68,11 @@ type WhatsAppConnector struct {
 	accountCleanupRouteOnce sync.Once
 	// 同一登录的远端解绑和本地清理必须串行，避免并发请求重复删除。
 	accountCleanupLocks sync.Map
+
+	// 收件箱推送客户端；inbox 模式下实时消息走这里，失败不回退 Dendrite。
+	inboxPush *inboxPushClient
+	// 收件箱发送/下载路由只注册一次。
+	inboxRouteOnce sync.Once
 }
 
 func init() {
@@ -167,6 +172,17 @@ func (wa *WhatsAppConnector) Start(ctx context.Context) error {
 	// 在业务迁移前初始化账号注销清理，构建时不再依赖外部补丁。
 	if err = wa.initAccountCleanup(ctx); err != nil {
 		return fmt.Errorf("failed to initialize account cleanup: %w", err)
+	}
+	// 收件箱模式：初始化推送客户端与 provisioning 发送/下载路由。
+	if wa.Config.Inbox.Enabled {
+		wa.inboxPush = newInboxPushClient(wa.Config.Inbox.PushURL, wa.Config.Inbox.PushSecret)
+		if wa.inboxPush == nil {
+			return fmt.Errorf("inbox mode enabled but push_url is empty")
+		}
+		if err = wa.initInboxProvision(ctx); err != nil {
+			return fmt.Errorf("failed to initialize inbox provision routes: %w", err)
+		}
+		wa.Bridge.Log.Info().Str("push_url", wa.Config.Inbox.PushURL).Msg("WhatsApp inbox mode enabled")
 	}
 
 	err = wa.migrateToLIDDMs(ctx)

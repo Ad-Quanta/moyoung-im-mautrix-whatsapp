@@ -103,7 +103,32 @@ func (wa *WhatsAppClient) historySyncLoop(ctx context.Context) {
 	}
 }
 
+// shouldDiscardHistorySyncNotification 判断是否应在下载前丢弃历史同步通知。
+// INITIAL_BOOTSTRAP / RECENT / FULL / ON_DEMAND 会拉会话历史并建房间，收件箱模式下直接丢弃；
+// PUSH_NAME / INITIAL_STATUS_V3 / NON_BLOCKING_DATA 仍走原路径以保留联系人昵称等处理。
+func shouldDiscardHistorySyncNotification(syncType waE2E.HistorySyncType) bool {
+	switch syncType {
+	case waE2E.HistorySyncType_INITIAL_BOOTSTRAP,
+		waE2E.HistorySyncType_RECENT,
+		waE2E.HistorySyncType_FULL,
+		waE2E.HistorySyncType_ON_DEMAND:
+		return true
+	default:
+		return false
+	}
+}
+
 func (wa *WhatsAppClient) saveWAHistorySyncNotification(ctx context.Context, evt *waE2E.HistorySyncNotification) {
+	// 收件箱模式：历史会话包在入队与下载前丢弃，避免触发 DownloadHistorySync 与建房。
+	// 仅 inbox 启用时丢弃；关闭 inbox 时保持桥原有历史同步行为。
+	if wa.inboxEnabled() && shouldDiscardHistorySyncNotification(evt.GetSyncType()) {
+		wa.UserLogin.Log.Info().
+			Stringer("sync_type", evt.GetSyncType()).
+			Uint32("chunk_order", evt.GetChunkOrder()).
+			Uint32("progress", evt.GetProgress()).
+			Msg("Discarding WhatsApp history sync notification before download (inbox mode)")
+		return
+	}
 	err := wa.Main.DB.HSNotif.Put(ctx, wa.UserLogin.ID, evt)
 	if err != nil {
 		wa.UserLogin.Log.Err(err).Msg("Failed to store history sync notification in queue")
@@ -135,6 +160,15 @@ func (wa *WhatsAppClient) downloadAndSaveWAHistorySyncData(ctx context.Context, 
 			errored = true
 		}
 	}()
+	// 双保险：队列中若仍有旧历史包，下载前再次丢弃并清理队列项。
+	if wa.inboxEnabled() && shouldDiscardHistorySyncNotification(evt.GetSyncType()) {
+		log.Info().Msg("Discarding queued WhatsApp history sync notification before DownloadHistorySync")
+		if err := wa.Main.DB.HSNotif.Delete(ctx, rowid); err != nil {
+			log.Err(err).Msg("Failed to delete discarded history sync notification")
+			errored = true
+		}
+		return
+	}
 	log.Debug().
 		Int64("oldest_msg_in_chunk_ts", evt.GetOldestMsgInChunkTimestampSec()).
 		Any("full_request_meta", evt.GetFullHistorySyncOnDemandRequestMetadata()).

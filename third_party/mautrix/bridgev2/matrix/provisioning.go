@@ -314,7 +314,8 @@ func (prov *ProvisioningAPI) AuthMiddleware(h http.Handler) http.Handler {
 		r.GetBody = func() (io.ReadCloser, error) {
 			return origBody, nil
 		}
-		r.Body = http.MaxBytesReader(w, origBody, 64*1024)
+		// 收件箱发送图片可达 8MB，将 provisioning 请求体上限提到 10MiB。
+		r.Body = http.MaxBytesReader(w, origBody, 10<<20)
 
 		ctx := context.WithValue(r.Context(), ProvisioningKeyRequest, r)
 		ctx = context.WithValue(ctx, provisioningUserKey, user)

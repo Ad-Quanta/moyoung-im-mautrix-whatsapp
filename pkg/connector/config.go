@@ -15,6 +15,13 @@ import (
 	"go.mau.fi/mautrix-whatsapp/pkg/msgconv"
 )
 
+// InboxConfig WhatsApp 收件箱旁路：启用后实时消息推 im-router，不再建 Matrix 房间。
+type InboxConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	PushURL    string `yaml:"push_url"`    // 例如 http://im-router:8080/internal/whatsapp/events
+	PushSecret string `yaml:"push_secret"` // 与 im-router provision/bearer 一致
+}
+
 type MediaRequestMethod string
 
 const (
@@ -54,6 +61,9 @@ type Config struct {
 	UseWhatsAppRetryStore       bool          `yaml:"use_whatsapp_retry_store"`
 	MaxMemberSync               int           `yaml:"max_member_sync"`
 	LazyAvatars                 bool          `yaml:"lazy_avatars"`
+
+	// Inbox 收件箱模式：实时消息绕过 Dendrite，推送到 im-router。
+	Inbox InboxConfig `yaml:"inbox"`
 
 	AnimatedSticker msgconv.AnimatedStickerConfig `yaml:"animated_sticker"`
 
@@ -134,6 +144,10 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Int, "max_member_sync")
 	helper.Copy(up.Bool, "lazy_avatars")
 
+	helper.Copy(up.Bool, "inbox", "enabled")
+	helper.Copy(up.Str, "inbox", "push_url")
+	helper.Copy(up.Str, "inbox", "push_secret")
+
 	helper.Copy(up.Str, "animated_sticker", "target")
 	helper.Copy(up.Int, "animated_sticker", "args", "width")
 	helper.Copy(up.Int, "animated_sticker", "args", "height")
@@ -209,6 +223,7 @@ func (wa *WhatsAppConnector) GetConfig() (string, any, up.Upgrader) {
 			{"proxy"},
 			{"displayname_template"},
 			{"call_start_notices"},
+			{"inbox"},
 			{"animated_sticker"},
 			{"history_sync"},
 		},

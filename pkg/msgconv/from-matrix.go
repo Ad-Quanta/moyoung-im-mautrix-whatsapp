@@ -482,6 +482,11 @@ func (mc *MessageConverter) convertToJPEG(webpImage []byte) ([]byte, error) {
 	return jpgBuffer.Bytes(), nil
 }
 
+// ConvertImageToJPEGPublic 供收件箱发送路径把 PNG/WebP 转成 JPEG（包装未导出的 convertToJPEG）。
+func (mc *MessageConverter) ConvertImageToJPEGPublic(img []byte) ([]byte, error) {
+	return mc.convertToJPEG(img)
+}
+
 func (mc *MessageConverter) convertToWebP(img []byte) ([]byte, int, error) {
 	decodedImg, _, err := image.Decode(bytes.NewReader(img))
 	if err != nil {

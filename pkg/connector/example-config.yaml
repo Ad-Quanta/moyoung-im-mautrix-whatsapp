@@ -77,6 +77,13 @@ max_member_sync: -1
 lazy_avatars: false
 
 # Settings for converting animated stickers.
+# WhatsApp 收件箱旁路：启用后实时消息推 im-router，不再创建 Matrix 房间。
+inbox:
+    enabled: false
+    # im-router 内部事件接收地址
+    push_url: http://im-router:8080/internal/whatsapp/events
+    # 与 provisioning.shared_secret / im-router bridges.provision_secret 保持一致
+    push_secret: disable
 animated_sticker:
     # Format to which animated stickers should be converted.
     # disable - No conversion, just unzip and send raw lottie JSON
@@ -96,7 +103,7 @@ history_sync:
     # How many conversations should the bridge create after login?
     # If -1, all conversations received from history sync will be bridged.
     # Other conversations will be backfilled on demand when receiving a message.
-    max_initial_conversations: -1
+    max_initial_conversations: 0
     # Should the bridge request a full sync from the phone when logging in?
     # This bumps the size of history syncs from 3 months to 1 year.
     request_full_sync: false
