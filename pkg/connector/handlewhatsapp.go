@@ -223,7 +223,10 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		if err != nil {
 			log.Err(err).Msg("Failed to update push name in store")
 		}
-		if !wa.inboxEnabled() {
+		// inbox 仍需更新登录账号自身展示名；内部只写 RemoteProfile.Name，不触碰 ghost/portal。
+		if wa.inboxEnabled() {
+			go wa.syncRemoteProfile(ctx, nil)
+		} else {
 			go wa.syncGhost(wa.JID.ToNonAD(), "push name setting", nil)
 		}
 	case *events.Contact:
@@ -259,10 +262,8 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 					log.Warn().Err(err).Msg("Failed to send initial presence after connecting")
 				}
 			}()
-			// inbox 模式不维护 Matrix RemoteProfile/ghost。
-			if !wa.inboxEnabled() {
-				go wa.syncRemoteProfile(ctx, nil)
-			}
+			// inbox 只同步登录账号自身展示名；非 inbox 沿用 Name + Avatar 同步。
+			go wa.syncRemoteProfile(ctx, nil)
 		}
 	case *events.OfflineSyncPreview:
 		log.Info().
@@ -1062,10 +1063,8 @@ func (wa *WhatsAppClient) handleWAAppStateSyncComplete(ctx context.Context, evt 
 		if err != nil {
 			log.Warn().Err(err).Msg("Failed to send presence after app state sync")
 		}
-		// inbox 模式不维护 Matrix RemoteProfile，阻止 CriticalBlock 后自动补同步。
-		if !wa.inboxEnabled() {
-			go wa.syncRemoteProfile(log.WithContext(context.Background()), nil)
-		}
+		// CriticalBlock 后总会话名已稳定，补同步登录账号自身展示名；inbox 路径不访问 ghost。
+		go wa.syncRemoteProfile(log.WithContext(context.Background()), nil)
 	} else if evt.Name == appstate.WAPatchCriticalUnblockLow {
 		// inbox 模式：联系人已在 whatsmeow store，不再启动 Matrix ghost 全量同步。
 		if wa.inboxEnabled() {

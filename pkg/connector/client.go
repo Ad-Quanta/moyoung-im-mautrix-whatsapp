@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -531,12 +532,47 @@ func (wa *WhatsAppClient) IsLoggedIn() bool {
 	return wa.Client != nil && wa.Client.IsLoggedIn()
 }
 
+// ownRemoteDisplayName 优先 BusinessName，其次 PushName；供登录账号 /profile 展示名使用。
+func ownRemoteDisplayName(businessName, pushName string) string {
+	if name := strings.TrimSpace(businessName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(pushName)
+}
+
+// applyInboxRemoteProfileName 仅更新登录账号展示名并保留手机号/头像；返回是否发生变更。
+func applyInboxRemoteProfileName(profile *status.RemoteProfile, name string) bool {
+	name = strings.TrimSpace(name)
+	if profile == nil || name == "" || profile.Name == name {
+		return false
+	}
+	profile.Name = name
+	return true
+}
+
 func (wa *WhatsAppClient) syncRemoteProfile(ctx context.Context, ghost *bridgev2.Ghost) {
-	// 兜底：inbox 模式不维护 Matrix RemoteProfile。
-	if wa.inboxEnabled() {
-		zerolog.Ctx(ctx).Debug().Msg("Inbox mode: refuse syncRemoteProfile")
+	name := ownRemoteDisplayName(wa.GetStore().BusinessName, wa.GetStore().PushName)
+	if name == "" {
 		return
 	}
+
+	// inbox：只维护登录账号自己的展示名，供 Router /profile；不依赖 Matrix ghost/avatar。
+	if wa.inboxEnabled() {
+		if !applyInboxRemoteProfileName(&wa.UserLogin.RemoteProfile, name) {
+			return
+		}
+		if err := wa.UserLogin.Save(ctx); err != nil {
+			zerolog.Ctx(ctx).Err(err).Msg("Failed to save remote profile")
+			return
+		}
+		if wa.Client != nil && wa.Client.IsConnected() {
+			wa.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+		}
+		zerolog.Ctx(ctx).Info().Str("name", name).Msg("Inbox mode: remote profile name updated")
+		return
+	}
+
+	// 非 inbox：沿用原逻辑，同步 Name + Avatar（依赖 own ghost）。
 	ownID := waid.MakeUserID(wa.GetStore().GetJID())
 	if ghost == nil {
 		var err error
@@ -551,11 +587,7 @@ func (wa *WhatsAppClient) syncRemoteProfile(ctx context.Context, ghost *bridgev2
 	if ghost.ID != ownID {
 		return
 	}
-	name := wa.GetStore().BusinessName
-	if name == "" {
-		name = wa.GetStore().PushName
-	}
-	if name == "" || wa.UserLogin.RemoteProfile.Name == name && wa.UserLogin.RemoteProfile.Avatar == ghost.AvatarMXC {
+	if wa.UserLogin.RemoteProfile.Name == name && wa.UserLogin.RemoteProfile.Avatar == ghost.AvatarMXC {
 		return
 	}
 	wa.UserLogin.RemoteProfile.Name = name
@@ -565,7 +597,7 @@ func (wa *WhatsAppClient) syncRemoteProfile(ctx context.Context, ghost *bridgev2
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to save remote profile")
 	}
 	// FIXME this might be racy, should invent a proper way to send last state with info filled
-	if wa.Client.IsConnected() {
+	if wa.Client != nil && wa.Client.IsConnected() {
 		wa.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	}
 	zerolog.Ctx(ctx).Info().Msg("Remote profile updated")
