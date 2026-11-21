@@ -12,11 +12,11 @@ func TestInboxGroupNameCacheAndFetchGate(t *testing.T) {
 
 	wa := &WhatsAppClient{}
 	wa.rememberInboxGroupName(jid, "测试")
-	if got := wa.getInboxGroupName(jid); got != "测试" {
-		t.Fatalf("getInboxGroupName=%q, want 测试", got)
+	if got, found := wa.getInboxGroupName(jid); !found || got != "测试" {
+		t.Fatalf("getInboxGroupName=%q found=%v, want 测试/true", got, found)
 	}
 
-	// 已有缓存时不应进入 fetching。
+	// 已有正式名时不应进入 fetching。
 	wa.ensureInboxGroupNameAsync(jid)
 	wa.inboxGroupNameMu.Lock()
 	_, fetching := wa.inboxGroupNameFetching[jid.String()]
@@ -25,31 +25,42 @@ func TestInboxGroupNameCacheAndFetchGate(t *testing.T) {
 		t.Fatal("cached name must not start fetch")
 	}
 
+	// 空名终态同样禁止自动补拉。
+	waEmpty := &WhatsAppClient{}
+	waEmpty.rememberInboxGroupName(jid, "")
+	waEmpty.ensureInboxGroupNameAsync(jid)
+	waEmpty.inboxGroupNameMu.Lock()
+	_, fetching = waEmpty.inboxGroupNameFetching[jid.String()]
+	waEmpty.inboxGroupNameMu.Unlock()
+	if fetching {
+		t.Fatal("empty terminal must not start fetch")
+	}
+
 	wa2 := &WhatsAppClient{}
-	wa2.markInboxGroupNameFailed(jid)
+	wa2.markInboxGroupNameLookupTempFail(jid)
 	wa2.ensureInboxGroupNameAsync(jid)
 	wa2.inboxGroupNameMu.Lock()
 	_, fetching = wa2.inboxGroupNameFetching[jid.String()]
 	wa2.inboxGroupNameMu.Unlock()
 	if fetching {
-		t.Fatal("cooldown must prevent fetch")
+		t.Fatal("lookup cooldown must prevent fetch")
 	}
 
-	// 冷却过期后应标记 fetching（Client 为空时后台会立刻失败并清掉 fetching）。
+	// 冷却过期后应标记 fetching（无 Main/push 时后台会立刻 temp-fail 并清掉 fetching）。
 	wa2.inboxGroupNameMu.Lock()
-	wa2.inboxGroupNameFailedAt[jid.String()] = time.Now().Add(-inboxGroupNameRetryAfter - time.Second)
+	wa2.inboxGroupNameTempFailAt[jid.String()] = time.Now().Add(-inboxGroupNameLookupRetryAfter - time.Second)
 	wa2.inboxGroupNameMu.Unlock()
 	wa2.ensureInboxGroupNameAsync(jid)
 	wa2.inboxGroupNameMu.Lock()
 	_, fetching = wa2.inboxGroupNameFetching[jid.String()]
 	wa2.inboxGroupNameMu.Unlock()
 	if !fetching {
-		// 后台 goroutine 可能已跑完；至少失败冷却应被刷新。
+		// 后台 goroutine 可能已跑完；至少应留下临时失败时间戳。
 		wa2.inboxGroupNameMu.Lock()
-		failedAt, ok := wa2.inboxGroupNameFailedAt[jid.String()]
+		failedAt, ok := wa2.inboxGroupNameTempFailAt[jid.String()]
 		wa2.inboxGroupNameMu.Unlock()
 		if !ok || time.Since(failedAt) > time.Second {
-			t.Fatal("expected fetching mark or fresh failure timestamp")
+			t.Fatal("expected fetching mark or fresh temp-fail timestamp")
 		}
 	}
 }

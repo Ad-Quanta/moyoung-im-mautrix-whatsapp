@@ -35,17 +35,17 @@ type inboxSendRequest struct {
 }
 
 type inboxSendResponse struct {
-	OK         bool   `json:"ok"`
-	MessageID  string `json:"message_id"`
-	SenderID   string `json:"sender_id"`
-	Timestamp  string `json:"timestamp"`
-	DirectPath string `json:"direct_path,omitempty"`
-	MediaKey   string `json:"media_key,omitempty"`
-	FileSHA256 string `json:"file_sha256,omitempty"`
+	OK            bool   `json:"ok"`
+	MessageID     string `json:"message_id"`
+	SenderID      string `json:"sender_id"`
+	Timestamp     string `json:"timestamp"`
+	DirectPath    string `json:"direct_path,omitempty"`
+	MediaKey      string `json:"media_key,omitempty"`
+	FileSHA256    string `json:"file_sha256,omitempty"`
 	FileEncSHA256 string `json:"file_enc_sha256,omitempty"`
-	FileLength uint64 `json:"file_length,omitempty"`
-	MimeType   string `json:"mime_type,omitempty"`
-	MediaType  string `json:"media_type,omitempty"`
+	FileLength    uint64 `json:"file_length,omitempty"`
+	MimeType      string `json:"mime_type,omitempty"`
+	MediaType     string `json:"media_type,omitempty"`
 }
 
 type inboxDownloadRequest struct {
@@ -236,6 +236,8 @@ func (wa *WhatsAppClient) inboxSend(ctx context.Context, req inboxSendRequest) (
 			if err != nil {
 				return nil, fmt.Errorf("upload image: %w", err)
 			}
+			// 上传成功后必须标记，否则响应不会带回 DirectPath/密钥，出站媒体无法再下载。
+			hasUpload = true
 			width := uint32(req.Width)
 			height := uint32(req.Height)
 			waMsg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
@@ -256,6 +258,8 @@ func (wa *WhatsAppClient) inboxSend(ctx context.Context, req inboxSendRequest) (
 			if err != nil {
 				return nil, fmt.Errorf("upload audio: %w", err)
 			}
+			// 上传成功后必须标记，否则响应不会带回 DirectPath/密钥，出站媒体无法再下载。
+			hasUpload = true
 			seconds := uint32(0)
 			if req.DurationMs > 0 {
 				seconds = uint32((req.DurationMs + 999) / 1000)
@@ -317,6 +321,9 @@ func (wa *WhatsAppClient) inboxDownload(ctx context.Context, req inboxDownloadRe
 		mediaType = whatsmeow.MediaImage
 	}
 	directPath := strings.TrimSpace(req.DirectPath)
+	if directPath == "" || !strings.HasPrefix(directPath, "/") {
+		return nil, "", fmt.Errorf("invalid direct_path %q: inbox media metadata missing; usually caused by outbound send not persisting upload keys", directPath)
+	}
 	keys := &msgconv.FailedMediaKeys{
 		Key:        mediaKey,
 		Length:     req.FileLength,
