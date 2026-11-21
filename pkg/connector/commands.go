@@ -101,6 +101,11 @@ func fnSync(ce *commands.Event) {
 		return c.Stringer("triggered_by_user", ce.User.MXID)
 	}
 	wa := login.Client.(*WhatsAppClient)
+	// inbox 模式禁止 !wa sync：这些命令面向 Matrix portal/ghost，不再作为业务旁路。
+	if wa.inboxEnabled() {
+		ce.Reply("Inbox mode: `!wa sync` is disabled (Matrix portal/ghost sync is not started).")
+		return
+	}
 	switch strings.ToLower(ce.Args[0]) {
 	case "group", "portal", "room":
 		if ce.Portal == nil {

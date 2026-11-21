@@ -433,7 +433,10 @@ func (wl *WALogin) onLoginComplete(ctx context.Context) (*bridgev2.LoginStep, er
 		if err != nil {
 			wl.Log.Warn().Err(err).Msg("Prekey upload wait failed")
 		}
-		go c.syncGhost(c.JID.ToNonAD(), "login", ptr.Ptr(""))
+		// inbox 模式不维护 Matrix ghost，登录后不再触发 syncGhost。
+		if !c.inboxEnabled() {
+			go c.syncGhost(c.JID.ToNonAD(), "login", ptr.Ptr(""))
+		}
 	}
 
 	return &bridgev2.LoginStep{

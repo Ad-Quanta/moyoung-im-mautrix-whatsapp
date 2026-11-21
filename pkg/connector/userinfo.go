@@ -29,6 +29,10 @@ var ResyncLoopInterval = 4 * time.Hour
 var ResyncJitterSeconds = 3600
 
 func (wa *WhatsAppClient) EnqueueGhostResync(ghost *bridgev2.Ghost) {
+	// inbox 模式不启动 ghostResyncLoop，禁止入队避免队列堆积。
+	if wa.inboxEnabled() {
+		return
+	}
 	lastSync := ghost.Metadata.(*waid.GhostMetadata).LastSync.Time
 	if ghost.AvatarID != "" && lastSync.Add(ResyncMinInterval).After(time.Now()) {
 		return
@@ -51,6 +55,10 @@ func (wa *WhatsAppClient) EnqueueGhostResync(ghost *bridgev2.Ghost) {
 }
 
 func (wa *WhatsAppClient) EnqueuePortalResync(portal *bridgev2.Portal, allowDM bool) {
+	// inbox 模式不启动 ghostResyncLoop，禁止 portal 入队。
+	if wa.inboxEnabled() {
+		return
+	}
 	jid, _ := waid.ParsePortalID(portal.ID)
 	lastSync := portal.Metadata.(*waid.PortalMetadata).LastSync.Time
 	if lastSync.Add(ResyncMinInterval).After(time.Now()) {
@@ -408,6 +416,11 @@ func (wa *WhatsAppClient) fetchGhostAvatar(ctx context.Context, ghost *bridgev2.
 
 func (wa *WhatsAppClient) resyncContacts(forceAvatarSync, automatic bool) {
 	log := wa.UserLogin.Log.With().Str("action", "resync contacts").Logger()
+	// inbox 模式：私聊名读 whatsmeow_contacts，禁止再刷 Matrix ghost。
+	if wa.inboxEnabled() {
+		log.Debug().Bool("automatic", automatic).Msg("Inbox mode: refuse Matrix contact resync")
+		return
+	}
 	baseCtx, session, ok := wa.beginContactResync(automatic)
 	if !ok {
 		log.Debug().Msg("Contact resync already in progress, skipping automatic resync")

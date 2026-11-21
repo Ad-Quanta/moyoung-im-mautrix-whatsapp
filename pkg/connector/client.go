@@ -416,7 +416,13 @@ func (wa *WhatsAppClient) startLoops() {
 	// 先取消旧 loop，再发布新的 loopCtx，避免后台任务继续使用已失效上下文。
 	wa.setLoopCtx(ctx)
 	ctx = wa.UserLogin.Log.WithContext(ctx)
+	// historySyncLoop 在 inbox 下仍需启动：PUSH_NAME 等包会写入 whatsmeow_contacts，供 Router 读私聊名。
 	go wa.historySyncLoop(ctx)
+	if wa.inboxEnabled() {
+		// inbox 模式不启动 Matrix ghost / 媒体回填循环，避免“事件层回退跳过、后台却仍在跑”。
+		wa.UserLogin.Log.Info().Msg("Inbox mode: skip ghostResyncLoop and mediaRequestLoop startup")
+		return
+	}
 	go wa.ghostResyncLoop(ctx)
 	if mrc := wa.Main.Config.HistorySync.MediaRequests; mrc.AutoRequestMedia && mrc.RequestMethod == MediaRequestMethodLocalTime {
 		go wa.mediaRequestLoop(ctx)
@@ -526,6 +532,11 @@ func (wa *WhatsAppClient) IsLoggedIn() bool {
 }
 
 func (wa *WhatsAppClient) syncRemoteProfile(ctx context.Context, ghost *bridgev2.Ghost) {
+	// 兜底：inbox 模式不维护 Matrix RemoteProfile。
+	if wa.inboxEnabled() {
+		zerolog.Ctx(ctx).Debug().Msg("Inbox mode: refuse syncRemoteProfile")
+		return
+	}
 	ownID := waid.MakeUserID(wa.GetStore().GetJID())
 	if ghost == nil {
 		var err error
@@ -561,6 +572,10 @@ func (wa *WhatsAppClient) syncRemoteProfile(ctx context.Context, ghost *bridgev2
 }
 
 func (wa *WhatsAppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.MatrixViewingChat) error {
+	// inbox 模式不做 Matrix 会话浏览触发的 portal/ghost 补同步。
+	if wa.inboxEnabled() {
+		return nil
+	}
 	var presence types.Presence
 	if msg.Portal != nil {
 		presence = types.PresenceAvailable

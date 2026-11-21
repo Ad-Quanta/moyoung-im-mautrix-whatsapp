@@ -185,24 +185,34 @@ func (wa *WhatsAppConnector) Start(ctx context.Context) error {
 		wa.Bridge.Log.Info().Str("push_url", wa.Config.Inbox.PushURL).Msg("WhatsApp inbox mode enabled")
 	}
 
-	err = wa.migrateToLIDDMs(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to migrate to LID DMs: %w", err)
-	}
-	err = wa.migrateMetaAIPortals(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to migrate Meta AI portals: %w", err)
-	}
-	go func() {
-		err = wa.syncMismatchingGhosts(wa.Bridge.BackgroundCtx)
+	// inbox 模式不维护 Matrix portal，启动期跳过 LID/MetaAI portal 迁移。
+	if !wa.Config.Inbox.Enabled {
+		err = wa.migrateToLIDDMs(ctx)
 		if err != nil {
-			wa.Bridge.Log.Err(err).Msg("Failed to sync mismatching ghosts")
+			return fmt.Errorf("failed to migrate to LID DMs: %w", err)
 		}
-		err = wa.removeRejoinedPNGhosts(wa.Bridge.BackgroundCtx)
+		err = wa.migrateMetaAIPortals(ctx)
 		if err != nil {
-			wa.Bridge.Log.Err(err).Msg("Failed to remove rejoined PN ghosts")
+			return fmt.Errorf("failed to migrate Meta AI portals: %w", err)
 		}
-	}()
+	} else {
+		wa.Bridge.Log.Info().Msg("Inbox mode: skip migrateToLIDDMs/migrateMetaAIPortals startup")
+	}
+	// inbox 模式不维护 Matrix ghost，跳过启动期 ghost 对齐任务。
+	if !wa.Config.Inbox.Enabled {
+		go func() {
+			err = wa.syncMismatchingGhosts(wa.Bridge.BackgroundCtx)
+			if err != nil {
+				wa.Bridge.Log.Err(err).Msg("Failed to sync mismatching ghosts")
+			}
+			err = wa.removeRejoinedPNGhosts(wa.Bridge.BackgroundCtx)
+			if err != nil {
+				wa.Bridge.Log.Err(err).Msg("Failed to remove rejoined PN ghosts")
+			}
+		}()
+	} else {
+		wa.Bridge.Log.Info().Msg("Inbox mode: skip syncMismatchingGhosts/removeRejoinedPNGhosts startup")
+	}
 	return nil
 }
 

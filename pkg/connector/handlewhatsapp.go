@@ -244,8 +244,12 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		wa.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 		if wa.offlineSyncWaiter.Load() == nil {
 			go func() {
+				// WASA 根密钥属于 WhatsApp 协议状态，inbox 也需要维护。
 				wa.resyncWASARootSecrets(ctx)
-				wa.requestMuseProfile(ctx)
+				// Muse 资料只服务 Matrix 侧，inbox 模式不启动。
+				if !wa.inboxEnabled() {
+					wa.requestMuseProfile(ctx)
+				}
 			}()
 		}
 		if len(wa.GetStore().PushName) > 0 {
@@ -255,7 +259,10 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 					log.Warn().Err(err).Msg("Failed to send initial presence after connecting")
 				}
 			}()
-			go wa.syncRemoteProfile(ctx, nil)
+			// inbox 模式不维护 Matrix RemoteProfile/ghost。
+			if !wa.inboxEnabled() {
+				go wa.syncRemoteProfile(ctx, nil)
+			}
 		}
 	case *events.OfflineSyncPreview:
 		log.Info().
@@ -865,6 +872,11 @@ func (wa *WhatsAppClient) syncGhost(jid types.JID, reason string, pictureID *str
 		Str("picture_id", ptr.Val(pictureID)).
 		Stringer("jid", jid).
 		Logger()
+	// 兜底：inbox 模式不写 Matrix ghost，漏网调用点在此直接拒绝。
+	if wa.inboxEnabled() {
+		log.Debug().Msg("Inbox mode: refuse syncGhost")
+		return
+	}
 	ctx := log.WithContext(wa.Main.Bridge.BackgroundCtx)
 	ghost, err := wa.Main.Bridge.GetGhostByID(ctx, waid.MakeUserID(jid))
 	if err != nil {
@@ -1050,9 +1062,17 @@ func (wa *WhatsAppClient) handleWAAppStateSyncComplete(ctx context.Context, evt 
 		if err != nil {
 			log.Warn().Err(err).Msg("Failed to send presence after app state sync")
 		}
-		go wa.syncRemoteProfile(log.WithContext(context.Background()), nil)
+		// inbox 模式不维护 Matrix RemoteProfile，阻止 CriticalBlock 后自动补同步。
+		if !wa.inboxEnabled() {
+			go wa.syncRemoteProfile(log.WithContext(context.Background()), nil)
+		}
 	} else if evt.Name == appstate.WAPatchCriticalUnblockLow {
-		go wa.resyncContacts(false, true)
+		// inbox 模式：联系人已在 whatsmeow store，不再启动 Matrix ghost 全量同步。
+		if wa.inboxEnabled() {
+			log.Debug().Msg("Inbox mode: skip automatic Matrix contact resync after app state sync")
+		} else {
+			go wa.resyncContacts(false, true)
+		}
 	}
 	wa.appStateRecoveryLock.Lock()
 	defer wa.appStateRecoveryLock.Unlock()
@@ -1145,6 +1165,11 @@ func (wa *WhatsAppClient) handleWAAppStateSyncError(ctx context.Context, evt *ev
 }
 
 func (wa *WhatsAppClient) resyncBlocklist(ctx context.Context) func() bool {
+	// inbox 模式不维护 Matrix portal 屏蔽状态，直接阻止 blocklist 同步启动。
+	if wa.inboxEnabled() {
+		zerolog.Ctx(ctx).Debug().Msg("Inbox mode: skip Matrix blocklist resync")
+		return noopUpdates
+	}
 	wa.blocklistLock.Lock()
 	defer wa.blocklistLock.Unlock()
 	return wa.resyncBlocklistUnlocked(ctx)
