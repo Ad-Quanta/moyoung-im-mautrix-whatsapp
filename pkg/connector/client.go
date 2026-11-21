@@ -153,6 +153,12 @@ type WhatsAppClient struct {
 
 	previousOwnLIDs     *exsync.Set[types.JID]
 	previousOwnLIDsLock sync.Mutex
+
+	// inbox 群名进程内缓存：仅在收到群消息且尚无群名时按需 GetGroupInfo，避免登录全量拉取。
+	inboxGroupNameMu       sync.Mutex
+	inboxGroupNames        map[string]string    // chatJID -> 正式群名
+	inboxGroupNameFetching map[string]struct{}  // 同 JID 单飞
+	inboxGroupNameFailedAt map[string]time.Time // 失败/空名冷却起点
 }
 
 var (
