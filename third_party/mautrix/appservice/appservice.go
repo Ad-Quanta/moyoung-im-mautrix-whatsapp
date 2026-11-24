@@ -176,6 +176,9 @@ type AppService struct {
 
 	Live  bool
 	Ready bool
+	// IgnoreHomeserverEvents 为 true 时，homeserver 回调直接应答。
+	// 不读 body、不校验 token、不调用 QueryHandler，避免收件箱模式再处理房间事件。
+	IgnoreHomeserverEvents bool
 
 	clients     map[id.UserID]*mautrix.Client
 	intents     map[id.UserID]*IntentAPI

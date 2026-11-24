@@ -65,6 +65,10 @@ func (wa *WhatsAppConnector) initInboxProvision(ctx context.Context) error {
 	if !wa.Config.Inbox.Enabled {
 		return nil
 	}
+	// 在注册路由前挂上绑定键校验。user_id 只存在于桥库，不能再被当成 Dendrite 账号。
+	if err := wa.installInboxProvisionIdentity(); err != nil {
+		return err
+	}
 	provisioning, ok := wa.Bridge.Matrix.(bridgev2.MatrixConnectorWithProvisioning)
 	if !ok {
 		return fmt.Errorf("matrix connector does not expose provisioning API")

@@ -93,6 +93,11 @@ func (as *AppService) CheckServerToken(w http.ResponseWriter, r *http.Request) (
 
 // PutTransaction handles a /transactions PUT call from the homeserver.
 func (as *AppService) PutTransaction(w http.ResponseWriter, r *http.Request) {
+	if as.IgnoreHomeserverEvents {
+		// 收件箱不消费 transaction。直接 200，不读 body，也不记 transaction id。
+		exhttp.WriteEmptyJSONResponse(w, http.StatusOK)
+		return
+	}
 	if !as.CheckServerToken(w, r) {
 		return
 	}
@@ -237,6 +242,10 @@ func (as *AppService) handleEvents(ctx context.Context, evts []*event.Event, def
 
 // GetRoom handles a /rooms GET call from the homeserver.
 func (as *AppService) GetRoom(w http.ResponseWriter, r *http.Request) {
+	if as.IgnoreHomeserverEvents {
+		mautrix.MNotFound.WithMessage("Homeserver queries are disabled").Write(w)
+		return
+	}
 	if !as.CheckServerToken(w, r) {
 		return
 	}
@@ -252,6 +261,10 @@ func (as *AppService) GetRoom(w http.ResponseWriter, r *http.Request) {
 
 // GetUser handles a /users GET call from the homeserver.
 func (as *AppService) GetUser(w http.ResponseWriter, r *http.Request) {
+	if as.IgnoreHomeserverEvents {
+		mautrix.MNotFound.WithMessage("Homeserver queries are disabled").Write(w)
+		return
+	}
 	if !as.CheckServerToken(w, r) {
 		return
 	}
@@ -266,6 +279,11 @@ func (as *AppService) GetUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (as *AppService) PostPing(w http.ResponseWriter, r *http.Request) {
+	if as.IgnoreHomeserverEvents {
+		// ping 同样不读 body、不校验 token。homeserver 摘掉 registration 前可能还会打过来。
+		exhttp.WriteEmptyJSONResponse(w, http.StatusOK)
+		return
+	}
 	if !as.CheckServerToken(w, r) {
 		return
 	}

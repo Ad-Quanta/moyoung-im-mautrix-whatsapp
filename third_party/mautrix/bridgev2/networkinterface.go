@@ -263,6 +263,14 @@ type NetworkConnector interface {
 	GetBridgeInfoVersion() (info, capabilities int)
 }
 
+// HomeserverOptionalNetwork 表示这个网络可以在没有 Matrix homeserver 的情况下运行。
+// WhatsApp 收件箱实现它：登录、收发和媒体都不依赖 Dendrite。
+type HomeserverOptionalNetwork interface {
+	NetworkConnector
+	// SkipHomeserver 为 true 时，桥不拨号 homeserver，也不处理 homeserver 推来的事件。
+	SkipHomeserver() bool
+}
+
 type StoppableNetwork interface {
 	NetworkConnector
 	// Stop is called when the bridge is stopping, after all network clients have been disconnected.

@@ -219,8 +219,22 @@ func (br *Bridge) StartConnectors(ctx context.Context) error {
 	return nil
 }
 
+func (br *Bridge) SkipsHomeserver() bool {
+	if br == nil || br.Network == nil {
+		return false
+	}
+	// 只认可选接口，避免没实现该方法的 Telegram/LINE 连接器被误跳过。
+	optional, ok := br.Network.(interface{ SkipHomeserver() bool })
+	return ok && optional.SkipHomeserver()
+}
+
 func (br *Bridge) PostStart(ctx context.Context) {
 	if br.Background {
+		return
+	}
+	if br.SkipsHomeserver() {
+		// 不更新 bridge info 版本。以后关掉收件箱时，旧 portal 仍会按版本差补发。
+		br.Log.Info().Msg("Skipping bridge info resend because homeserver is not used")
 		return
 	}
 	rawBridgeInfoVer := br.DB.KV.Get(ctx, database.KeyBridgeInfoVersion)

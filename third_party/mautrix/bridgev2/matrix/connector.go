@@ -191,6 +191,9 @@ func (br *Connector) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if br.Bridge != nil && br.Bridge.SkipsHomeserver() {
+		return br.startWithoutHomeserver(ctx)
+	}
 	needsStateResync := br.Config.Encryption.Default &&
 		br.Bridge.DB.KV.Get(ctx, database.KeyEncryptionStateResynced) != "true"
 	if needsStateResync {
@@ -252,6 +255,28 @@ func (br *Connector) Start(ctx context.Context) error {
 	if needsStateResync {
 		br.ResyncEncryptionState(ctx)
 	}
+	return nil
+}
+
+// startWithoutHomeserver 启动 provisioning 所需的 appservice HTTP，但不连接 Dendrite。
+func (br *Connector) startWithoutHomeserver(ctx context.Context) error {
+	err := br.StateStore.Upgrade(ctx)
+	if err != nil {
+		return bridgev2.DBUpgradeError{Section: "matrix_state", Err: err}
+	}
+	// homeserver 若仍把旧 transaction 推过来，直接应答，不解析、不入队。
+	br.AS.IgnoreHomeserverEvents = true
+	br.Websocket = false
+	if br.Config.AppService.NoServer {
+		br.Log.Debug().Msg("Not starting appservice HTTP server, assuming someone else is routing traffic")
+	} else if br.AS.Host.IsConfigured() {
+		br.Log.Info().Msg("Starting appservice HTTP server without homeserver connection")
+		go br.AS.Start()
+	} else {
+		br.Log.WithLevel(zerolog.FatalLevel).Msg("Appservice HTTP listener is not configured")
+		return ExitError{23}
+	}
+	br.AS.Ready = true
 	return nil
 }
 
@@ -632,6 +657,10 @@ func (br *Connector) FormatGhostMXID(userID networkid.UserID) id.UserID {
 }
 
 func (br *Connector) NewUserIntent(ctx context.Context, userID id.UserID, accessToken string) (bridgev2.MatrixAPI, string, error) {
+	if br.Bridge != nil && br.Bridge.SkipsHomeserver() {
+		// 收件箱不建 double puppet。返回空 intent 且不调用 Setup，避免 as_token 去 homeserver Whoami。
+		return nil, accessToken, nil
+	}
 	intent, newToken, err := br.DoublePuppet.Setup(ctx, userID, accessToken)
 	if err != nil {
 		if errors.Is(err, ErrNoAccessToken) {

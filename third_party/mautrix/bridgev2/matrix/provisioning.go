@@ -73,6 +73,10 @@ type ProvisioningAPI struct {
 	// authenticate as instead of using the user ID provided in the query
 	// parameter.
 	GetUserIDFromRequest func(r *http.Request) id.UserID
+
+	// NormalizeUserID 在共享密钥通过后、查库前执行。
+	// WhatsApp 收件箱用它把 user_id 收成桥内绑定键；失败则直接 400，避免插入空用户或误当成 Dendrite 账号。
+	NormalizeUserID func(raw id.UserID) (id.UserID, error)
 }
 
 type provisioningContextKey int
@@ -83,7 +87,9 @@ const (
 )
 
 func (prov *ProvisioningAPI) GetUser(r *http.Request) *bridgev2.User {
-	return r.Context().Value(provisioningUserKey).(*bridgev2.User)
+	// 中间件未写入用户时返回 nil，交给调用方返回 401，而不是在类型断言处 panic。
+	user, _ := r.Context().Value(provisioningUserKey).(*bridgev2.User)
+	return user
 }
 
 func (prov *ProvisioningAPI) GetRouter() *http.ServeMux {
@@ -282,9 +288,24 @@ func (prov *ProvisioningAPI) AuthMiddleware(h http.Handler) http.Handler {
 		if userID == "" && prov.GetUserIDFromRequest != nil {
 			userID = prov.GetUserIDFromRequest(r)
 		}
+		// 先规范化再查库。收件箱绑定键不是 homeserver 上的账号，这里不能走 Matrix 用户校验。
+		if prov.NormalizeUserID != nil {
+			normalized, normErr := prov.NormalizeUserID(userID)
+			if normErr != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(normErr).Msg("Rejected provisioning user id")
+				mautrix.MInvalidParam.WithMessage(normErr.Error()).Write(w)
+				return
+			}
+			userID = normalized
+		}
+		if userID == "" {
+			mautrix.MInvalidParam.WithMessage("user_id is required").Write(w)
+			return
+		}
 		if !exstrings.ConstantTimeEqual(auth, secret) {
 			var err error
-			if !prov.br.Config.Provisioning.AllowMatrixAuth {
+			// 收件箱模式即使误开 allow_matrix_auth，也不向 homeserver 校验 token。
+			if !prov.br.Config.Provisioning.AllowMatrixAuth || (prov.br.Bridge != nil && prov.br.Bridge.SkipsHomeserver()) {
 				err = errors.New("matrix auth is disabled")
 			} else if after, ok := strings.CutPrefix(auth, "openid:"); ok {
 				err = prov.checkFederatedMatrixAuth(r.Context(), userID, after)
@@ -299,12 +320,12 @@ func (prov *ProvisioningAPI) AuthMiddleware(h http.Handler) http.Handler {
 			}
 		}
 		user, err := prov.br.Bridge.GetUserByMXID(r.Context(), userID)
-		if err != nil {
+		if err != nil || user == nil {
 			zerolog.Ctx(r.Context()).Err(err).Msg("Failed to get user")
 			mautrix.MUnknown.WithMessage("Failed to get user").Write(w)
 			return
 		}
-		// TODO handle user being nil?
+		// user_id 只作为桥内主键；收件箱模式下它不是 Dendrite 账号。
 		// TODO per-endpoint permissions?
 		if !user.Permissions.Login {
 			mautrix.MForbidden.WithMessage("User does not have login permissions").Write(w)

@@ -80,10 +80,11 @@ func init() {
 }
 
 var (
-	_ bridgev2.NetworkConnector        = (*WhatsAppConnector)(nil)
-	_ bridgev2.MaxFileSizeingNetwork   = (*WhatsAppConnector)(nil)
-	_ bridgev2.StoppableNetwork        = (*WhatsAppConnector)(nil)
-	_ bridgev2.NetworkResettingNetwork = (*WhatsAppConnector)(nil)
+	_ bridgev2.NetworkConnector          = (*WhatsAppConnector)(nil)
+	_ bridgev2.MaxFileSizeingNetwork     = (*WhatsAppConnector)(nil)
+	_ bridgev2.StoppableNetwork          = (*WhatsAppConnector)(nil)
+	_ bridgev2.NetworkResettingNetwork   = (*WhatsAppConnector)(nil)
+	_ bridgev2.HomeserverOptionalNetwork = (*WhatsAppConnector)(nil)
 )
 
 func (wa *WhatsAppConnector) SetMaxFileSize(maxSize int64) {
@@ -151,6 +152,11 @@ func (wa *WhatsAppConnector) Init(bridge *bridgev2.Bridge) {
 	}
 }
 
+// SkipHomeserver 在收件箱模式下为 true。桥不拨号 Dendrite，也不处理 homeserver 事件。
+func (wa *WhatsAppConnector) SkipHomeserver() bool {
+	return wa.Config.Inbox.Enabled
+}
+
 func (wa *WhatsAppConnector) Start(ctx context.Context) error {
 	if !wa.MsgConv.DirectMedia && wa.Config.LazyAvatars {
 		return fmt.Errorf("lazy_avatars set without enabling global direct_media")
@@ -175,6 +181,11 @@ func (wa *WhatsAppConnector) Start(ctx context.Context) error {
 	}
 	// 收件箱模式：初始化推送客户端与 provisioning 发送/下载路由。
 	if wa.Config.Inbox.Enabled {
+		// errors/all 会在掉线时调用 GetManagementRoom，从而在 Dendrite 新建管理房间。
+		// 收件箱不使用管理房间，启动时强制关掉，避免配置文件里的 errors 重新把房间建出来。
+		if wa.Bridge != nil && wa.Bridge.Config != nil {
+			wa.Bridge.Config.BridgeStatusNotices = ""
+		}
 		wa.inboxPush = newInboxPushClient(wa.Config.Inbox.PushURL, wa.Config.Inbox.PushSecret)
 		if wa.inboxPush == nil {
 			return fmt.Errorf("inbox mode enabled but push_url is empty")

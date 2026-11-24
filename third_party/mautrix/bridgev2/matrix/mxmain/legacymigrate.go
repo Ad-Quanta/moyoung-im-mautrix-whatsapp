@@ -218,6 +218,11 @@ func (br *BridgeMain) postMigrateDMPortal(ctx context.Context, portal *bridgev2.
 }
 
 func (br *BridgeMain) PostMigrate(ctx context.Context) error {
+	if br.Bridge != nil && br.Bridge.SkipsHomeserver() {
+		// 收件箱不回写 Matrix 房间，也不删除 database_was_migrated。
+		// 以后关掉收件箱时，这张表还在，迁移可以补做。
+		return nil
+	}
 	log := br.Log.With().Str("action", "post-migrate").Logger()
 	wasMigrated, err := br.DB.TableExists(ctx, "database_was_migrated")
 	if err != nil {

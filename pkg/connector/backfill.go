@@ -36,7 +36,11 @@ func (wa *WhatsAppClient) historySyncLoop(ctx context.Context) {
 	dispatchTimer := time.NewTimer(wa.Main.Config.HistorySync.DispatchWait)
 
 	var timerPending atomic.Bool
-	if !wa.isNewLogin && wa.UserLogin.Metadata.(*waid.UserLoginMetadata).HistorySyncPortalsNeedCreating {
+	// 收件箱模式不建 Matrix portal。旧登录行上的 HistorySyncPortalsNeedCreating，
+	// 以及 whatsapp_history_sync_conversation 里的残留会话，都不能在重连时再触发建房。
+	// 本循环仍要跑：PUSH_NAME 等包要下载，whatsmeow 才会把联系人写入 whatsmeow_contacts。
+	createPortals := !wa.inboxEnabled()
+	if createPortals && !wa.isNewLogin && wa.UserLogin.Metadata.(*waid.UserLoginMetadata).HistorySyncPortalsNeedCreating {
 		dispatchTimer.Reset(5 * time.Second)
 		timerPending.Store(true)
 	} else {
@@ -50,19 +54,21 @@ func (wa *WhatsAppClient) historySyncLoop(ctx context.Context) {
 		}
 	}
 	wa.UserLogin.Log.Debug().Msg("Starting history sync loops")
-	// Separate loop for creating portals to ensure it doesn't block processing new history sync payloads.
-	go func() {
-		for {
-			select {
-			case <-dispatchTimer.C:
-				timerPending.Store(false)
-				wa.createPortalsFromHistorySync(ctx)
-			case <-ctx.Done():
-				wa.UserLogin.Log.Debug().Msg("Stopping portal creation history sync loop")
-				return
+	// 建房循环与历史包处理分开，避免建房阻塞新通知。收件箱模式不启动这条循环。
+	if createPortals {
+		go func() {
+			for {
+				select {
+				case <-dispatchTimer.C:
+					timerPending.Store(false)
+					wa.createPortalsFromHistorySync(ctx)
+				case <-ctx.Done():
+					wa.UserLogin.Log.Debug().Msg("Stopping portal creation history sync loop")
+					return
+				}
 			}
-		}
-	}()
+		}()
+	}
 	for {
 		var resetTimer, errored bool
 		select {
@@ -94,7 +100,8 @@ func (wa *WhatsAppClient) historySyncLoop(ctx context.Context) {
 			wa.UserLogin.Log.Debug().Msg("Stopping main history sync loop")
 			return
 		}
-		if resetTimer {
+		// 收件箱模式没有建房循环消费这个计时器，不能再 Reset，否则计时器无人接收。
+		if resetTimer && createPortals {
 			timerPending.Store(true)
 		}
 		if timerPending.Load() {
@@ -425,6 +432,11 @@ func (wa *WhatsAppClient) handleWAHistorySync(
 }
 
 func (wa *WhatsAppClient) createPortalsFromHistorySync(ctx context.Context) {
+	// 双保险：即便旧标记或外部调用绕过了 historySyncLoop 的启动判断，也不从历史会话重建 portal。
+	if wa.inboxEnabled() {
+		wa.UserLogin.Log.Info().Msg("Inbox mode: skip creating Matrix portals from history sync")
+		return
+	}
 	log := wa.UserLogin.Log.With().
 		Str("action", "create portals from history sync").
 		Logger()
