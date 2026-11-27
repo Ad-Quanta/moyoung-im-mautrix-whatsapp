@@ -1,20 +1,21 @@
 FROM golang:1-alpine3.24 AS builder
 
-RUN apk add --no-cache git ca-certificates build-base su-exec olm-dev
+RUN apk add --no-cache ca-certificates git
 
 COPY . /build
 WORKDIR /build
-RUN ./build.sh
+# 独立 Inbox 入口使用标准 Go 构建。
+RUN CGO_ENABLED=0 ./build.sh
 
 FROM alpine:3.24
 
 ENV UID=1337 \
     GID=1337
 
-RUN apk add --no-cache ffmpeg su-exec ca-certificates olm bash jq curl yq-go lottieconverter
+RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /build/mautrix-whatsapp /usr/bin/mautrix-whatsapp
-COPY --from=builder /build/docker-run.sh /docker-run.sh
 VOLUME /data
+WORKDIR /data
 
-CMD ["/docker-run.sh"]
+CMD ["/usr/bin/mautrix-whatsapp", "-config", "/data/config.yaml"]

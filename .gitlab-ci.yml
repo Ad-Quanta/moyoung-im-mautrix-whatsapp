@@ -1,3 +1,11 @@
-include:
-- project: 'mautrix/ci'
-  file: '/gov2-as-default.yml'
+# 独立运行 Inbox 的测试和构建，产出部署兼容的二进制。
+image: golang:1.27.2
+
+test-and-build:
+  stage: test
+  script:
+    - go test ./...
+    - CGO_ENABLED=0 ./build.sh
+  artifacts:
+    paths:
+      - mautrix-whatsapp

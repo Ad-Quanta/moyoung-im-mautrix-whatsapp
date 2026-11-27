@@ -1,0 +1,3 @@
+# 部署脚本在 Linux 容器中运行，Windows 检出也使用 LF。
+/build.sh text eol=lf
+/docker-run.sh text eol=lf
